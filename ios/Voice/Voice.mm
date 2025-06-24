@@ -33,14 +33,43 @@
 
 ///** Returns "YES" if no errors had occurred */
 - (BOOL)setupAudioSession {
+  NSError *categoryError = nil;
+
+  // Set optimal audio session configuration for speech recognition
   if ([self isHeadsetPluggedIn] || [self isHeadSetBluetooth]) {
     [self.audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
-                       withOptions:AVAudioSessionCategoryOptionAllowBluetooth
-                             error:nil];
+                       withOptions:AVAudioSessionCategoryOptionAllowBluetooth |
+                                   AVAudioSessionCategoryOptionMixWithOthers
+                             error:&categoryError];
   } else {
     [self.audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
-                       withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker
-                             error:nil];
+                       withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker |
+                                   AVAudioSessionCategoryOptionMixWithOthers
+                             error:&categoryError];
+  }
+
+  if (categoryError != nil) {
+    NSLog(@"[Voice] Failed to set audio session category: %@", [categoryError localizedDescription]);
+    [self sendResult:@{
+      @"code" : @"audio_category_error",
+      @"message" : [categoryError localizedDescription]
+    }:nil:nil:nil];
+    return NO;
+  }
+
+  // Set preferred sample rate and buffer duration for better performance
+  NSError *sampleRateError = nil;
+  [self.audioSession setPreferredSampleRate:16000.0 error:&sampleRateError];
+  if (sampleRateError != nil) {
+    NSLog(@"[Voice] Warning: Failed to set preferred sample rate: %@", [sampleRateError localizedDescription]);
+    // Continue anyway, this is not critical
+  }
+
+  NSError *bufferDurationError = nil;
+  [self.audioSession setPreferredIOBufferDuration:0.02 error:&bufferDurationError]; // 20ms buffer
+  if (bufferDurationError != nil) {
+    NSLog(@"[Voice] Warning: Failed to set buffer duration: %@", [bufferDurationError localizedDescription]);
+    // Continue anyway, this is not critical
   }
 
   NSError *audioSessionError = nil;
@@ -396,47 +425,34 @@
                       }
                     }];
 
-         // Get audio format from input node with validation
-   AVAudioFormat *recordingFormat = nil;
+            // Always use a reliable format instead of trying to get from hardware
+   // This avoids hardware compatibility issues on different devices
+   NSLog(@"[Voice] Creating reliable audio format for speech recognition");
 
-   @try {
-     recordingFormat = [inputNode outputFormatForBus:0];
-     NSLog(@"[Voice] Got audio format: sampleRate=%.1f, channels=%d",
-           recordingFormat ? recordingFormat.sampleRate : 0,
-           recordingFormat ? recordingFormat.channelCount : 0);
-   } @catch (NSException *exception) {
-     NSLog(@"[Voice] Exception getting audio format: %@", exception.reason);
-     recordingFormat = nil;
-   }
+   AVAudioFormat *recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                                     sampleRate:16000.0
+                                                                       channels:1
+                                                                    interleaved:YES];
 
-   // Validate the audio format
-   if (recordingFormat == nil ||
-       recordingFormat.sampleRate <= 0 ||
-       recordingFormat.channelCount <= 0 ||
-       recordingFormat.sampleRate > 48000) {
-
-     NSLog(@"[Voice] Invalid audio format detected, using default format");
-     NSLog(@"[Voice] Invalid values: sampleRate=%.1f, channels=%d",
-           recordingFormat ? recordingFormat.sampleRate : 0,
-           recordingFormat ? recordingFormat.channelCount : 0);
-
-     // Use a standard format that should always work
+   if (recordingFormat == nil) {
+     NSLog(@"[Voice] Failed to create common format, trying standard format");
      recordingFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000.0 channels:1];
-
-     if (recordingFormat == nil) {
-       // Fallback to common format
-       recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                           sampleRate:16000.0
-                                                             channels:1
-                                                          interleaved:YES];
-     }
-
-     NSLog(@"[Voice] Using fallback format: sampleRate=%.1f, channels=%d",
-           recordingFormat.sampleRate, recordingFormat.channelCount);
-   } else {
-     NSLog(@"[Voice] Using original audio format: sampleRate=%.1f, channels=%d",
-           recordingFormat.sampleRate, recordingFormat.channelCount);
    }
+
+   if (recordingFormat == nil) {
+     NSLog(@"[Voice] Failed to create any audio format");
+     [self sendResult:@{
+       @"code" : @"audio_format_creation_failed",
+       @"message" : @"Unable to create audio format"
+     }:nil:nil:nil];
+     [self teardown];
+     return;
+   }
+
+   NSLog(@"[Voice] Created audio format: sampleRate=%.1f, channels=%d, format=%@",
+         recordingFormat.sampleRate,
+         recordingFormat.channelCount,
+         recordingFormat.formatDescription);
 
    // Final validation before using the format
    if (recordingFormat == nil) {
@@ -525,7 +541,17 @@
      }
 
      NSLog(@"[Voice] Connecting audio nodes...");
+
+     // Get current input node format for logging
+     AVAudioFormat *inputFormat = [inputNode outputFormatForBus:0];
+     NSLog(@"[Voice] Input node format: sampleRate=%.1f, channels=%d",
+           inputFormat ? inputFormat.sampleRate : 0,
+           inputFormat ? inputFormat.channelCount : 0);
+
+     // Connect using our reliable recording format
      [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
+     NSLog(@"[Voice] Connected input node to mixer with format: sampleRate=%.1f, channels=%d",
+           recordingFormat.sampleRate, recordingFormat.channelCount);
 
      NSLog(@"[Voice] Preparing audio engine...");
      [self.audioEngine prepare];
