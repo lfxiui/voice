@@ -377,18 +377,45 @@
                       }
                     }];
 
-   AVAudioFormat *recordingFormat = [inputNode outputFormatForBus:0];
-   AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
-   [self.audioEngine attachNode:mixer];
+   // Wait a bit for audio session to be fully ready after authorization
+   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+     // Re-get the input node in case it changed
+     AVAudioInputNode *currentInputNode = self.audioEngine.inputNode;
+     AVAudioFormat *recordingFormat = [currentInputNode outputFormatForBus:0];
 
-   // Start recording and append recording buffer to speech recognizer
-   @try {
-     [mixer
-         installTapOnBus:0
-              bufferSize:1024
-                  format:recordingFormat
-                   block:^(AVAudioPCMBuffer *_Nonnull buffer,
-                           AVAudioTime *_Nonnull when) {
+     // Validate the audio format
+     if (recordingFormat == nil || recordingFormat.sampleRate == 0 || recordingFormat.channelCount == 0) {
+       NSLog(@"[Voice] Invalid audio format: sampleRate=%f, channelCount=%d",
+             recordingFormat ? recordingFormat.sampleRate : 0,
+             recordingFormat ? recordingFormat.channelCount : 0);
+
+       // Try to get a valid format by recreating the audio engine
+       [self.audioEngine reset];
+       self.audioEngine = [[AVAudioEngine alloc] init];
+       AVAudioInputNode *newInputNode = self.audioEngine.inputNode;
+       recordingFormat = [newInputNode outputFormatForBus:0];
+
+       // If still invalid, use a default format
+       if (recordingFormat == nil || recordingFormat.sampleRate == 0) {
+         recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                             sampleRate:16000.0
+                                                               channels:1
+                                                            interleaved:YES];
+         NSLog(@"[Voice] Using default audio format");
+       }
+     }
+
+     AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
+     [self.audioEngine attachNode:mixer];
+
+     // Start recording and append recording buffer to speech recognizer
+     @try {
+       [mixer
+           installTapOnBus:0
+                bufferSize:1024
+                    format:recordingFormat
+                     block:^(AVAudioPCMBuffer *_Nonnull buffer,
+                             AVAudioTime *_Nonnull when) {
                      // Volume Level Metering
                      UInt32 inNumberFrames = buffer.frameLength;
                      float LEVEL_LOWPASS_TRIG = 0.5;
@@ -439,29 +466,30 @@
                        [self.recognitionRequest appendAudioPCMBuffer:buffer];
                      }
                    }];
-   } @catch (NSException *exception) {
-     NSLog(@"[Error] - %@ %@", exception.name, exception.reason);
-     [self sendResult:@{
-       @"code" : @"start_recording",
-       @"message" : [exception reason]
-     }:nil:nil:nil];
-     [self teardown];
-     return;
-   } @finally {
-   }
+     } @catch (NSException *exception) {
+       NSLog(@"[Error] - %@ %@", exception.name, exception.reason);
+       [self sendResult:@{
+         @"code" : @"start_recording",
+         @"message" : [exception reason]
+       }:nil:nil:nil];
+       [self teardown];
+       return;
+     } @finally {
+     }
 
-   [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
-   [self.audioEngine prepare];
-   NSError *audioSessionError = nil;
-   [self.audioEngine startAndReturnError:&audioSessionError];
-   if (audioSessionError != nil) {
-     [self sendResult:@{
-       @"code" : @"audio",
-       @"message" : [audioSessionError localizedDescription]
-     }:nil:nil:nil];
+     [self.audioEngine connect:currentInputNode to:mixer format:recordingFormat];
+     [self.audioEngine prepare];
+     NSError *audioSessionError = nil;
+     [self.audioEngine startAndReturnError:&audioSessionError];
+     if (audioSessionError != nil) {
+       [self sendResult:@{
+         @"code" : @"audio",
+         @"message" : [audioSessionError localizedDescription]
+            }:nil:nil:nil];
      [self teardown];
      return;
    }
+   }); // End of dispatch_after block
  } @catch (NSException *exception) {
    [self sendResult:@{
      @"code" : @"start_recording",
