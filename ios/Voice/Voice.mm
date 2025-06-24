@@ -540,17 +540,31 @@
      } @finally {
      }
 
-     NSLog(@"[Voice] Connecting audio nodes...");
+          NSLog(@"[Voice] Connecting audio nodes...");
 
-     // Get current input node format for logging
+     // Get current input node format - we MUST use this for connection
      AVAudioFormat *inputFormat = [inputNode outputFormatForBus:0];
      NSLog(@"[Voice] Input node format: sampleRate=%.1f, channels=%d",
            inputFormat ? inputFormat.sampleRate : 0,
            inputFormat ? inputFormat.channelCount : 0);
 
-     // Connect using our reliable recording format
-     [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
-     NSLog(@"[Voice] Connected input node to mixer with format: sampleRate=%.1f, channels=%d",
+     // Validate input format
+     if (inputFormat == nil || inputFormat.sampleRate <= 0 || inputFormat.channelCount <= 0) {
+       NSLog(@"[Voice] Invalid input node format, cannot connect");
+       [self sendResult:@{
+         @"code" : @"invalid_input_format",
+         @"message" : @"Audio input format is invalid"
+       }:nil:nil:nil];
+       [self teardown];
+       return;
+     }
+
+     // Connect using the input node's native format (not our recording format)
+     // This is critical - the connection must use compatible formats
+     [self.audioEngine connect:inputNode to:mixer format:inputFormat];
+     NSLog(@"[Voice] Connected input node to mixer with input format: sampleRate=%.1f, channels=%d",
+           inputFormat.sampleRate, inputFormat.channelCount);
+     NSLog(@"[Voice] Tap will use recording format: sampleRate=%.1f, channels=%d",
            recordingFormat.sampleRate, recordingFormat.channelCount);
 
      NSLog(@"[Voice] Preparing audio engine...");
