@@ -377,36 +377,27 @@
                       }
                     }];
 
-   // Wait a bit for audio session to be fully ready after authorization
-   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-     // Re-get the input node in case it changed
-     AVAudioInputNode *currentInputNode = self.audioEngine.inputNode;
-     AVAudioFormat *recordingFormat = [currentInputNode outputFormatForBus:0];
+   // Configure audio format before starting
+   AVAudioFormat *recordingFormat = nil;
 
-     // Validate the audio format
-     if (recordingFormat == nil || recordingFormat.sampleRate == 0 || recordingFormat.channelCount == 0) {
-       NSLog(@"[Voice] Invalid audio format: sampleRate=%f, channelCount=%d",
-             recordingFormat ? recordingFormat.sampleRate : 0,
-             recordingFormat ? recordingFormat.channelCount : 0);
+   // Try to get the current format
+   @try {
+     recordingFormat = [inputNode outputFormatForBus:0];
+   } @catch (NSException *exception) {
+     NSLog(@"[Voice] Failed to get audio format: %@", exception.reason);
+   }
 
-       // Try to get a valid format by recreating the audio engine
-       [self.audioEngine reset];
-       self.audioEngine = [[AVAudioEngine alloc] init];
-       AVAudioInputNode *newInputNode = self.audioEngine.inputNode;
-       recordingFormat = [newInputNode outputFormatForBus:0];
+   // If format is invalid or unavailable, use a default format
+   if (recordingFormat == nil || recordingFormat.sampleRate == 0 || recordingFormat.channelCount == 0) {
+     NSLog(@"[Voice] Using default audio format for first-time authorization");
+     recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                         sampleRate:16000.0
+                                                           channels:1
+                                                        interleaved:YES];
+   }
 
-       // If still invalid, use a default format
-       if (recordingFormat == nil || recordingFormat.sampleRate == 0) {
-         recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                             sampleRate:16000.0
-                                                               channels:1
-                                                            interleaved:YES];
-         NSLog(@"[Voice] Using default audio format");
-       }
-     }
-
-     AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
-     [self.audioEngine attachNode:mixer];
+   AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
+   [self.audioEngine attachNode:mixer];
 
      // Start recording and append recording buffer to speech recognizer
      @try {
@@ -477,7 +468,7 @@
      } @finally {
      }
 
-     [self.audioEngine connect:currentInputNode to:mixer format:recordingFormat];
+          [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
      [self.audioEngine prepare];
      NSError *audioSessionError = nil;
      [self.audioEngine startAndReturnError:&audioSessionError];
@@ -485,11 +476,10 @@
        [self sendResult:@{
          @"code" : @"audio",
          @"message" : [audioSessionError localizedDescription]
-            }:nil:nil:nil];
-     [self teardown];
-     return;
-   }
-   }); // End of dispatch_after block
+       }:nil:nil:nil];
+       [self teardown];
+       return;
+     }
  } @catch (NSException *exception) {
    [self sendResult:@{
      @"code" : @"start_recording",
@@ -617,6 +607,15 @@ RCT_EXPORT_METHOD(startSpeech
    return;
  }
 
+ // Store if this is the first time requesting authorization
+ __block BOOL isFirstTimeAuth = NO;
+
+ // Check current authorization status first
+ SFSpeechRecognizerAuthorizationStatus currentStatus = [SFSpeechRecognizer authorizationStatus];
+ if (currentStatus == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
+   isFirstTimeAuth = YES;
+ }
+
  [SFSpeechRecognizer requestAuthorization:^(
                          SFSpeechRecognizerAuthorizationStatus status) {
    switch (status) {
@@ -634,7 +633,14 @@ RCT_EXPORT_METHOD(startSpeech
                           nil):nil:nil:nil];
      break;
    case SFSpeechRecognizerAuthorizationStatusAuthorized:
-     [self setupAndStartRecognizing:localeStr];
+     // If this is first time authorization, add a delay to ensure audio session is ready
+     if (isFirstTimeAuth) {
+       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+         [self setupAndStartRecognizing:localeStr];
+       });
+     } else {
+       [self setupAndStartRecognizing:localeStr];
+     }
      break;
    }
  }];
