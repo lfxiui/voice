@@ -59,6 +59,11 @@
     return NO;
   }
 
+  // Add a small delay to ensure audio hardware is fully ready
+  // This is especially important for first-time authorization
+  [NSThread sleepForTimeInterval:0.1];
+  NSLog(@"[Voice] Audio session activated with delay");
+
   [[NSNotificationCenter defaultCenter]
       addObserver:self
          selector:@selector(teardown)
@@ -391,24 +396,73 @@
                       }
                     }];
 
-      // Get audio format from input node
-   AVAudioFormat *recordingFormat = [inputNode outputFormatForBus:0];
+         // Get audio format from input node with validation
+   AVAudioFormat *recordingFormat = nil;
 
-   // Log the format for debugging
-   NSLog(@"[Voice] Audio format: sampleRate=%.1f, channels=%d",
-         recordingFormat.sampleRate, recordingFormat.channelCount);
+   @try {
+     recordingFormat = [inputNode outputFormatForBus:0];
+     NSLog(@"[Voice] Got audio format: sampleRate=%.1f, channels=%d",
+           recordingFormat ? recordingFormat.sampleRate : 0,
+           recordingFormat ? recordingFormat.channelCount : 0);
+   } @catch (NSException *exception) {
+     NSLog(@"[Voice] Exception getting audio format: %@", exception.reason);
+     recordingFormat = nil;
+   }
+
+   // Validate the audio format
+   if (recordingFormat == nil ||
+       recordingFormat.sampleRate <= 0 ||
+       recordingFormat.channelCount <= 0 ||
+       recordingFormat.sampleRate > 48000) {
+
+     NSLog(@"[Voice] Invalid audio format detected, using default format");
+     NSLog(@"[Voice] Invalid values: sampleRate=%.1f, channels=%d",
+           recordingFormat ? recordingFormat.sampleRate : 0,
+           recordingFormat ? recordingFormat.channelCount : 0);
+
+     // Use a standard format that should always work
+     recordingFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:16000.0 channels:1];
+
+     if (recordingFormat == nil) {
+       // Fallback to common format
+       recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                           sampleRate:16000.0
+                                                             channels:1
+                                                          interleaved:YES];
+     }
+
+     NSLog(@"[Voice] Using fallback format: sampleRate=%.1f, channels=%d",
+           recordingFormat.sampleRate, recordingFormat.channelCount);
+   } else {
+     NSLog(@"[Voice] Using original audio format: sampleRate=%.1f, channels=%d",
+           recordingFormat.sampleRate, recordingFormat.channelCount);
+   }
+
+   // Final validation before using the format
+   if (recordingFormat == nil) {
+     NSLog(@"[Voice] Critical error: recordingFormat is nil after all fallbacks");
+     [self sendResult:@{
+       @"code" : @"audio_format_error",
+       @"message" : @"Failed to create valid audio format"
+     }:nil:nil:nil];
+     [self teardown];
+     return;
+   }
 
    AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
    [self.audioEngine attachNode:mixer];
+   NSLog(@"[Voice] Attached mixer node to audio engine");
 
-     // Start recording and append recording buffer to speech recognizer
-     @try {
-       [mixer
-           installTapOnBus:0
-                bufferSize:1024
-                    format:recordingFormat
-                     block:^(AVAudioPCMBuffer *_Nonnull buffer,
-                             AVAudioTime *_Nonnull when) {
+   // Start recording and append recording buffer to speech recognizer
+   NSLog(@"[Voice] Installing tap on mixer with format: sampleRate=%.1f, channels=%d",
+         recordingFormat.sampleRate, recordingFormat.channelCount);
+   @try {
+     [mixer
+         installTapOnBus:0
+              bufferSize:1024
+                  format:recordingFormat
+                   block:^(AVAudioPCMBuffer *_Nonnull buffer,
+                           AVAudioTime *_Nonnull when) {
                      // Volume Level Metering
                      UInt32 inNumberFrames = buffer.frameLength;
                      float LEVEL_LOWPASS_TRIG = 0.5;
