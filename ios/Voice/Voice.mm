@@ -271,12 +271,17 @@
 }
 
 - (void)setupAndStartRecognizing:(NSString *)localeStr {
+ NSLog(@"[Voice] Starting speech recognition setup with locale: %@", localeStr);
+
  self.audioSession = [AVAudioSession sharedInstance];
  self.priorAudioCategory = [self.audioSession category];
+ NSLog(@"[Voice] Audio session category: %@", self.priorAudioCategory);
+
  // Tear down resources before starting speech recognition..
  [self teardown];
 
  self.sessionId = [[NSUUID UUID] UUIDString];
+ NSLog(@"[Voice] Session ID: %@", self.sessionId);
 
  NSLocale *locale = nil;
  if ([localeStr length] > 0) {
@@ -292,10 +297,13 @@
  self.speechRecognizer.delegate = self;
 
  // Start audio session...
+ NSLog(@"[Voice] Setting up audio session...");
  if (![self setupAudioSession]) {
+   NSLog(@"[Voice] Failed to setup audio session");
    [self teardown];
    return;
  }
+ NSLog(@"[Voice] Audio session setup completed");
 
  self.recognitionRequest =
      [[SFSpeechAudioBufferRecognitionRequest alloc] init];
@@ -311,17 +319,23 @@
 
  if (self.audioEngine == nil) {
    self.audioEngine = [[AVAudioEngine alloc] init];
+   NSLog(@"[Voice] Created new audio engine");
+ } else {
+   NSLog(@"[Voice] Reusing existing audio engine");
  }
 
  @try {
    AVAudioInputNode *inputNode = self.audioEngine.inputNode;
    if (inputNode == nil) {
+     NSLog(@"[Voice] Failed to get input node");
      [self sendResult:@{@"code" : @"input"}:nil:nil:nil];
      [self teardown];
      return;
    }
+   NSLog(@"[Voice] Got input node successfully");
 
    [self sendEventWithName:@"onSpeechStart" body:nil];
+   NSLog(@"[Voice] Sent onSpeechStart event");
 
    // A recognition task represents a speech recognition session.
    // We keep a reference to the task so that it can be cancelled.
@@ -377,24 +391,12 @@
                       }
                     }];
 
-   // Configure audio format before starting
-   AVAudioFormat *recordingFormat = nil;
+      // Get audio format from input node
+   AVAudioFormat *recordingFormat = [inputNode outputFormatForBus:0];
 
-   // Try to get the current format
-   @try {
-     recordingFormat = [inputNode outputFormatForBus:0];
-   } @catch (NSException *exception) {
-     NSLog(@"[Voice] Failed to get audio format: %@", exception.reason);
-   }
-
-   // If format is invalid or unavailable, use a default format
-   if (recordingFormat == nil || recordingFormat.sampleRate == 0 || recordingFormat.channelCount == 0) {
-     NSLog(@"[Voice] Using default audio format for first-time authorization");
-     recordingFormat = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
-                                                         sampleRate:16000.0
-                                                           channels:1
-                                                        interleaved:YES];
-   }
+   // Log the format for debugging
+   NSLog(@"[Voice] Audio format: sampleRate=%.1f, channels=%d",
+         recordingFormat.sampleRate, recordingFormat.channelCount);
 
    AVAudioMixerNode *mixer = [[AVAudioMixerNode alloc] init];
    [self.audioEngine attachNode:mixer];
@@ -468,11 +470,17 @@
      } @finally {
      }
 
-          [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
+     NSLog(@"[Voice] Connecting audio nodes...");
+     [self.audioEngine connect:inputNode to:mixer format:recordingFormat];
+
+     NSLog(@"[Voice] Preparing audio engine...");
      [self.audioEngine prepare];
+
+     NSLog(@"[Voice] Starting audio engine...");
      NSError *audioSessionError = nil;
      [self.audioEngine startAndReturnError:&audioSessionError];
      if (audioSessionError != nil) {
+       NSLog(@"[Voice] Audio engine start failed: %@", [audioSessionError localizedDescription]);
        [self sendResult:@{
          @"code" : @"audio",
          @"message" : [audioSessionError localizedDescription]
@@ -480,6 +488,7 @@
        [self teardown];
        return;
      }
+     NSLog(@"[Voice] Audio engine started successfully");
  } @catch (NSException *exception) {
    [self sendResult:@{
      @"code" : @"start_recording",
@@ -607,16 +616,7 @@ RCT_EXPORT_METHOD(startSpeech
    return;
  }
 
- // Store if this is the first time requesting authorization
- __block BOOL isFirstTimeAuth = NO;
-
- // Check current authorization status first
- SFSpeechRecognizerAuthorizationStatus currentStatus = [SFSpeechRecognizer authorizationStatus];
- if (currentStatus == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
-   isFirstTimeAuth = YES;
- }
-
- [SFSpeechRecognizer requestAuthorization:^(
+  [SFSpeechRecognizer requestAuthorization:^(
                          SFSpeechRecognizerAuthorizationStatus status) {
    switch (status) {
    case SFSpeechRecognizerAuthorizationStatusNotDetermined:
@@ -633,14 +633,7 @@ RCT_EXPORT_METHOD(startSpeech
                           nil):nil:nil:nil];
      break;
    case SFSpeechRecognizerAuthorizationStatusAuthorized:
-     // If this is first time authorization, add a delay to ensure audio session is ready
-     if (isFirstTimeAuth) {
-       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-         [self setupAndStartRecognizing:localeStr];
-       });
-     } else {
-       [self setupAndStartRecognizing:localeStr];
-     }
+     [self setupAndStartRecognizing:localeStr];
      break;
    }
  }];
